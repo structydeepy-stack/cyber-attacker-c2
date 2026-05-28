@@ -1,15 +1,15 @@
 from fastapi import FastAPI, Request, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from datetime import datetime
-import asyncio
 import subprocess
-import threading
 import os
+import requests
 
 app = FastAPI(title="PYNCAT C2 CONTROL v2.1")
 
 logs = []
 pyncat_process = None
+DEFENSE_URL = "https://your-defense-app.up.railway.app"   # ← CHANGE THIS
 
 def add_log(message: str, level: str = "INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -17,8 +17,13 @@ def add_log(message: str, level: str = "INFO"):
     logs.append(entry)
     print(entry)
 
+def notify_defense(status: str):
+    try:
+        requests.post(f"{DEFENSE_URL}/status", json={"status": status}, timeout=3)
+    except:
+        pass  # Defense might be offline
+
 def run_pyncat_listener(port: int = 4444, use_ssl: bool = True):
-    """Run PyNcat listener in background"""
     global pyncat_process
     cmd = ["python3", "pyncat.py", "-l", "-p", str(port)]
     if use_ssl:
@@ -27,17 +32,13 @@ def run_pyncat_listener(port: int = 4444, use_ssl: bool = True):
     add_log(f"Starting PyNcat Listener on port {port} {'(SSL)' if use_ssl else ''}", "CRITICAL")
     
     try:
-        pyncat_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=os.getcwd()
-        )
-        add_log("✅ PyNcat Listener is now running in background!", "SUCCESS")
+        pyncat_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=os.getcwd())
+        add_log("✅ PyNcat Listener is now RUNNING", "SUCCESS")
+        notify_defense("active")
     except Exception as e:
-        add_log(f"Failed to start PyNcat: {e}", "ERROR")
+        add_log(f"Failed to start listener: {e}", "ERROR")
 
+# ================== DASHBOARD ==================
 @app.get("/", response_class=HTMLResponse)
 async def c2_dashboard():
     return """<!DOCTYPE html>
@@ -46,83 +47,48 @@ async def c2_dashboard():
     <meta charset="UTF-8">
     <title>PYNCAT C2 CONTROL</title>
     <style>
-        :root { --neon-red: #ff0044; --neon-orange: #ff8800; --neon-cyan: #00ffff; }
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body {
-            background: #0a0005;
-            color: #ddd;
-            font-family: 'Courier New', monospace;
-        }
-        .scanline {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: linear-gradient(transparent 50%, rgba(255,0,68,0.04) 50%);
-            background-size: 100% 4px;
-            pointer-events: none;
-            animation: scan 4s linear infinite;
-            z-index: 1;
-        }
+        :root { --neon-red: #ff0044; --neon-orange: #ff8800; }
+        body { background:#0a0005; color:#ddd; font-family:'Courier New',monospace; }
+        .scanline { position:fixed; top:0; left:0; width:100%; height:100%; background:linear-gradient(transparent 50%, rgba(255,0,68,0.04) 50%); background-size:100% 4px; animation:scan 4s linear infinite; pointer-events:none; z-index:1; }
         @keyframes scan { 0%{transform:translateY(-100%);} 100%{transform:translateY(100%);} }
-        
-        .glitch { color: var(--neon-red); animation: glitch-skew 4s infinite linear alternate-reverse; }
-        .container { max-width: 1100px; margin: 0 auto; padding: 20px; position: relative; z-index: 2; }
-        .log {
-            background: #050000;
-            border: 2px solid var(--neon-red);
-            padding: 20px;
-            height: 58vh;
-            overflow-y: auto;
-            white-space: pre-wrap;
-            box-shadow: 0 0 25px var(--neon-red);
-            font-size: 1.05rem;
-        }
-        button {
-            background: transparent;
-            border: 3px solid var(--neon-red);
-            color: var(--neon-red);
-            padding: 18px 40px;
-            font-size: 1.4rem;
-            font-weight: bold;
-            margin: 20px 0;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        button:hover {
-            background: var(--neon-red);
-            color: #000;
-            box-shadow: 0 0 40px var(--neon-red);
-        }
+        .glitch { color:var(--neon-red); animation:glitch-skew 4s infinite linear alternate-reverse; }
+        .container { max-width:1100px; margin:0 auto; padding:20px; position:relative; z-index:2; }
+        .log { background:#050000; border:2px solid var(--neon-red); padding:20px; height:55vh; overflow-y:auto; white-space:pre-wrap; box-shadow:0 0 25px var(--neon-red); }
+        button { background:transparent; border:3px solid var(--neon-red); color:var(--neon-red); padding:18px 40px; font-size:1.4rem; margin:10px; cursor:pointer; transition:all 0.3s; }
+        button:hover { background:var(--neon-red); color:#000; box-shadow:0 0 40px var(--neon-red); }
     </style>
 </head>
 <body>
     <div class="scanline"></div>
     <div class="container">
         <h1 class="glitch" data-text="PYNCAT PERSISTENT C2">PYNCAT PERSISTENT C2</h1>
-        <p class="neon-orange">Status: <span id="status">READY</span></p>
-        
+        <p>Defense Status: <span id="defense-status" style="color:#00ff88;">Checking...</span></p>
         <div class="log" id="log"></div>
-        
-        <button onclick="startListener()">🚀 START PYNCAT LISTENER (Port 4444)</button>
-        <button onclick="stopListener()" style="border-color:#00ff88;color:#00ff88;">⛔ STOP LISTENER</button>
+        <button onclick="startListener()">🚀 START LISTENER</button>
+        <button onclick="stopListener()" style="border-color:#ff8800;color:#ff8800;">⛔ STOP LISTENER</button>
     </div>
 
     <script>
-        async function fetchLogs() {
-            const res = await fetch('/logs');
-            const text = await res.text();
-            document.getElementById('log').textContent = text;
+        async function fetchLogs() { 
+            const res = await fetch('/logs'); 
+            document.getElementById('log').textContent = await res.text();
             document.getElementById('log').scrollTop = 999999;
         }
         setInterval(fetchLogs, 800);
         fetchLogs();
 
-        async function startListener() {
-            await fetch('/start', {method: 'POST'});
-            alert("🚀 PyNcat Listener Started!");
+        async function updateDefenseStatus() {
+            try {
+                const res = await fetch('https://your-defense-app.up.railway.app/status'); // ← CHANGE THIS
+                const data = await res.json();
+                document.getElementById('defense-status').textContent = data.status === 'active' ? '🛡️ DEFENSE MONITORING' : '🔴 DEFENSE QUIET';
+            } catch(e) {}
         }
-        async function stopListener() {
-            await fetch('/stop', {method: 'POST'});
-            alert("⛔ Listener Stop Command Sent");
-        }
+        setInterval(updateDefenseStatus, 3000);
+        updateDefenseStatus();
+
+        async function startListener() { await fetch('/start', {method:'POST'}); }
+        async function stopListener() { await fetch('/stop', {method:'POST'}); }
     </script>
 </body>
 </html>"""
@@ -134,15 +100,16 @@ async def get_logs():
 @app.post("/start")
 async def start_listener(background_tasks: BackgroundTasks):
     background_tasks.add_task(run_pyncat_listener, 4444, True)
-    return {"status": "listener_starting"}
+    return {"status": "starting"}
 
 @app.post("/stop")
 async def stop_listener():
     global pyncat_process
     if pyncat_process:
         pyncat_process.terminate()
-        add_log("Listener termination signal sent", "WARNING")
-    return {"status": "stop_signal_sent"}
+        add_log("Listener stopped", "WARNING")
+        notify_defense("inactive")
+    return {"status": "stopped"}
 
 if __name__ == "__main__":
     import uvicorn
