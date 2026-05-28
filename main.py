@@ -9,7 +9,7 @@ app = FastAPI(title="PYNCAT C2 CONTROL v2.1")
 
 logs = []
 pyncat_process = None
-DEFENSE_URL = "https://your-defense-app.up.railway.app"   # ← CHANGE THIS
+DEFENSE_URL = "https://cyber-defense-backend-production.up.railway.app/"   # ← CHANGE THIS
 
 def add_log(message: str, level: str = "INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
